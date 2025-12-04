@@ -1,0 +1,12 @@
+Flask
+PyMySQL
+PyJWT
+pyotp
+requests
+captcha
+qrcode
+Flask-Cors
+Flask-Limiter
+Flask-SocketIO
+APScheduler
+Pillow
