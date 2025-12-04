@@ -199,10 +199,9 @@ def upload_file():
                     stmt = "INSERT IGNORE INTO contract_permissions (contract_id, subject_id, subject_type, can_view, can_download) VALUES (%s, %s, %s, %s, %s)"
                     cursor.executemany(stmt, perm_values)
                 trace_id = f"UPLOAD_{user_id}_{uuid.uuid4().hex[:8]}"
-                # 🟢 新增：写入审计日志
                 cursor.execute(
-                    "INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, %s, %s, 'N/A', %s)", 
-                    (user_id, new_file_id, action_type, get_beijing_time())
+                    "INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, %s, 'UPLOAD', %s, %s)",
+                    (user_id, new_file_id, trace_id, get_beijing_time())
                 )
                 
                 conn.commit()
@@ -325,9 +324,14 @@ def manage_folders():
                 new_folder_id = cursor.lastrowid
                 _copy_parent_permissions(cursor, req_parent_id, new_folder_id)
                 
+                # 🟢 中文日志
+                trace_info = f"新建文件夹: {req_name}"
+                cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'CREATE_FOLDER', %s, %s)", (user_id, trace_info, get_beijing_time()))
+                
                 conn.commit()
                 return jsonify({"success": True})
             else:
+                # GET 逻辑保持不变...
                 if role == 'admin':
                     cursor.execute("SELECT * FROM folders WHERE parent_id = %s ORDER BY created_at ASC", (parent_id,))
                 else:
@@ -343,13 +347,27 @@ def manage_folders():
 @admin_required
 def folder_ops(fid):
     conn = get_db_connection()
+    user_id = request.current_user_id
     try:
         with conn.cursor() as cursor:
+            cursor.execute("SELECT name FROM folders WHERE id=%s", (fid,))
+            folder = cursor.fetchone()
+            folder_name = folder['name'] if folder else "Unknown"
+
             if request.method == 'PUT':
-                cursor.execute("UPDATE folders SET name=%s WHERE id=%s", (request.json.get('name'), fid))
+                new_name = request.json.get('name')
+                cursor.execute("UPDATE folders SET name=%s WHERE id=%s", (new_name, fid))
+                # 🟢 中文日志
+                trace_info = f"重命名文件夹: {folder_name} -> {new_name}"
+                cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'RENAME_FOLDER', %s, %s)", (user_id, trace_info, get_beijing_time()))
+                
             elif request.method == 'DELETE':
                 if fid == 0: return jsonify({"error": "Root locked"}), 400
                 delete_folder_recursive(cursor, fid)
+                # 🟢 中文日志
+                trace_info = f"删除文件夹: {folder_name} (ID:{fid})"
+                cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'DELETE_FOLDER', %s, %s)", (user_id, trace_info, get_beijing_time()))
+                
             conn.commit()
             return jsonify({"success": True})
     finally: conn.close()
@@ -360,29 +378,25 @@ def delete_contract(cid):
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT uploader_id, file_path FROM contracts WHERE id=%s", (cid,))
+            # 🟢 必须查出 title 才能记录日志
+            cursor.execute("SELECT uploader_id, file_path, title FROM contracts WHERE id=%s", (cid,))
             row = cursor.fetchone()
             if not row: return jsonify({"error": "Not found"}), 404
             
             if request.current_user_role != 'admin' and str(row['uploader_id']) != str(request.current_user_id):
                 return jsonify({"error": "Permission denied"}), 403
             
-            # 🟢 新增：写入审计日志 (在删除数据前)
-            # 注意：删除文件后，日志中关联的 file_name (通过LEFT JOIN contracts) 将变为空，
-            # 这是当前数据库设计的限制，但操作记录会保留。
-            cursor.execute(
-                "INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, %s, 'DELETE', 'N/A', %s)", 
-                (request.current_user_id, cid, get_beijing_time())
-            )
-            
             if row and os.path.exists(row['file_path']):
                 try: os.remove(row['file_path'])
                 except: pass
-            trace_id = f"DELETE_{request.current_user_id}_{int(time.time())}"
+            
+            # 🟢 中文日志 (记录在 trace_id 中，因为 contract_id 即将被删)
+            trace_info = f"删除文件: {row['title']}"
             cursor.execute(
-                "INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, %s, %s, %s, %s)",
-                (request.current_user_id, cid, 'DELETE', trace_id, get_beijing_time())
+                "INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'DELETE', %s, %s)",
+                (request.current_user_id, trace_info, get_beijing_time())
             )
+
             cursor.execute("DELETE FROM contracts WHERE id=%s", (cid,))
             cursor.execute("DELETE FROM contract_permissions WHERE contract_id=%s", (cid,))
             conn.commit()
@@ -393,9 +407,20 @@ def delete_contract(cid):
 @admin_required
 def rename_contract(cid):
     conn = get_db_connection()
+    user_id = request.current_user_id
     try:
         with conn.cursor() as cursor:
-            cursor.execute("UPDATE contracts SET title=%s WHERE id=%s", (request.json.get('title'), cid))
+            cursor.execute("SELECT title FROM contracts WHERE id=%s", (cid,))
+            old_row = cursor.fetchone()
+            old_title = old_row['title'] if old_row else "Unknown"
+            new_title = request.json.get('title')
+            
+            cursor.execute("UPDATE contracts SET title=%s WHERE id=%s", (new_title, cid))
+            
+            # 🟢 中文日志
+            trace_info = f"文件重命名: {old_title} -> {new_title}"
+            cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, %s, 'RENAME_FILE', %s, %s)", (user_id, cid, trace_info, get_beijing_time()))
+            
             conn.commit()
             return jsonify({"success": True})
     finally: conn.close()
