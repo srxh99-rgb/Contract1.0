@@ -2,6 +2,7 @@ import io
 import os
 import time
 import uuid
+from datetime import datetime, timedelta
 import docx
 import openpyxl
 from PIL import Image
@@ -180,7 +181,7 @@ class WatermarkEngine:
     def process_file(file_path, file_type, user_info, trace_id, add_watermark=True):
         output = PdfWriter()
         email_display = user_info.get('email') or user_info.get('feishu_open_id') or '未知用户'
-        download_time = time.strftime('%Y-%m-%d %H:%M:%S')
+        download_time = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
         watermark_text = f"{user_info['name']} - {email_display} - {download_time}"
         
         input_pdf = None
