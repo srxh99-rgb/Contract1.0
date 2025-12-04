@@ -1,5 +1,6 @@
 import React from 'react';
-import { Folder, UserCog, ShieldCheck, FileClock, ScanLine, Settings } from 'lucide-react';
+import { Folder, UserCog, ShieldCheck, FileClock, ScanLine, Settings, Archive } from 'lucide-react';
+
 
 interface SidebarProps {
     currentView: string;
@@ -47,7 +48,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                                 <ShieldCheck size={18}/> 管理员管理
                             </button>
                         )}
-                        
+						
+                        <MenuItem view="backups" icon={Archive} label="系统备份" />
                         <MenuItem view="logs" icon={FileClock} label="审计日志" />
                         <MenuItem view="verify" icon={ScanLine} label="水印验证" />
                     </>

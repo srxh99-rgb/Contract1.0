@@ -6,9 +6,9 @@ class Config:
     # 获取当前文件的上级目录的上级目录 (即 backend 根目录)
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    DB_HOST = os.getenv('DB_HOST', '192.168.252.49')
-    DB_USER = os.getenv('DB_USER', 'root')
-    DB_PASS = os.getenv('DB_PASS', 'mysql_ZtpfH7')
+    DB_HOST = os.getenv('DB_HOST', '127.0.0.1')
+    DB_USER = os.getenv('DB_USER', '*****')
+    DB_PASS = os.getenv('DB_PASS', '******')
     DB_NAME = 'contract_system'
 
     SECRET_KEY = os.getenv('SECRET_KEY') or uuid.uuid4().hex

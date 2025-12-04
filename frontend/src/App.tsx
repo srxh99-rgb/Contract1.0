@@ -11,6 +11,7 @@ import { AdminManagementModal } from './components/Modals/AdminManagementModal';
 import { AdminProfileModal } from './components/Modals/AdminProfileModal';
 import { AlertModal } from './components/Modals/AlertModal';
 import { authFetch, API_BASE_URL } from './api/client'; // 引入 authFetch
+import BackupManagement from './views/BackupManagement';
 
 export default function App() {
     // 🟢 修改：从 sessionStorage 读取
@@ -103,6 +104,7 @@ export default function App() {
                             setSearchQuery={setSearchQuery}
                         />
                     )}
+					{currentView === 'backups' && user.role === 'admin' && <BackupManagement />}
                     {currentView === 'logs' && <AuditLogView />}
                     {currentView === 'verify' && <WatermarkVerifyView />}
                 </main>

@@ -1,4 +1,6 @@
-from app import create_app
+from app import create_app, socketio
+from app.db import init_db
+from app.scheduler import init_scheduler
 
 app = create_app()
 

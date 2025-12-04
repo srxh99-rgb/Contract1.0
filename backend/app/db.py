@@ -11,7 +11,6 @@ def get_db_connection():
     )
 
 def init_db():
-    # 修正：从配置中获取数据库连接信息
     host = current_app.config['DB_HOST']
     user = current_app.config['DB_USER']
     password = current_app.config['DB_PASS']
@@ -26,6 +25,7 @@ def init_db():
             cursor.execute(f"USE {db_name}")
             
             # 定义表结构
+            # 🟢 关键：请注意 audit_logs 这一行末尾必须有逗号
             tables = [
                 "users (id INT AUTO_INCREMENT PRIMARY KEY, feishu_open_id VARCHAR(255), username VARCHAR(100), password VARCHAR(255), name VARCHAR(100), email VARCHAR(255), role VARCHAR(20) DEFAULT 'user', is_active BOOLEAN DEFAULT TRUE, failed_attempts INT DEFAULT 0, lockout_until TIMESTAMP NULL, mfa_secret VARCHAR(32) DEFAULT NULL, force_change_password BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
                 "user_groups (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
@@ -34,17 +34,23 @@ def init_db():
                 "contracts (id INT AUTO_INCREMENT PRIMARY KEY, title VARCHAR(255) NOT NULL, file_path VARCHAR(500) NOT NULL, file_type VARCHAR(50), security_level VARCHAR(50), file_size VARCHAR(50), uploader_id INT, folder_id INT DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
                 "folder_permissions (id INT AUTO_INCREMENT PRIMARY KEY, folder_id INT NOT NULL, subject_id INT NOT NULL, subject_type ENUM('user', 'group') NOT NULL, can_view BOOLEAN DEFAULT FALSE, can_download BOOLEAN DEFAULT FALSE, UNIQUE KEY unique_perm (folder_id, subject_id, subject_type))",
                 "contract_permissions (id INT AUTO_INCREMENT PRIMARY KEY, contract_id INT NOT NULL, subject_id INT NOT NULL, subject_type ENUM('user', 'group') DEFAULT 'user', can_view BOOLEAN DEFAULT FALSE, can_download BOOLEAN DEFAULT FALSE, UNIQUE KEY unique_perm (contract_id, subject_id, subject_type))",
-                "audit_logs (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT, contract_id INT, action_type VARCHAR(50), trace_id VARCHAR(255), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+                "audit_logs (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT, contract_id INT, action_type VARCHAR(50), trace_id VARCHAR(255), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+                "system_settings (id INT AUTO_INCREMENT PRIMARY KEY, `key` VARCHAR(50) NOT NULL UNIQUE, `value` TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)"
             ]
             
             for t in tables: 
                 cursor.execute(f"CREATE TABLE IF NOT EXISTS {t}")
             
+            cursor.execute("SELECT * FROM system_settings WHERE `key`='backup_schedule'")
+            if not cursor.fetchone():
+                # 默认每天凌晨 2 点备份
+                default_config = '{"type": "daily", "time": "02:00"}'
+                cursor.execute("INSERT INTO system_settings (`key`, `value`) VALUES ('backup_schedule', %s)", (default_config,))
+            
             # 补丁与初始化
             try: cursor.execute("CREATE UNIQUE INDEX unique_name ON user_groups(name)")
             except: pass
             
-            # 检查字段完整性 (简略版，确保核心字段存在)
             cursor.execute("SHOW COLUMNS FROM users LIKE 'mfa_secret'")
             if not cursor.fetchone(): cursor.execute("ALTER TABLE users ADD COLUMN mfa_secret VARCHAR(32) DEFAULT NULL")
             
@@ -54,7 +60,7 @@ def init_db():
             # 初始化管理员
             cursor.execute("SELECT * FROM users WHERE username='admin'")
             if not cursor.fetchone():
-                cursor.execute("INSERT INTO users (username, password, name, role) VALUES ('admin', 'admin', '系统管理员', 'admin')")
+                cursor.execute("INSERT INTO users (username, password, name, role, is_active, force_change_password) VALUES ('admin', 'admin', '系统管理员', 'admin', 1, 1)")
             
             # 初始化组
             for g_name in ['默认组', '管理组']:

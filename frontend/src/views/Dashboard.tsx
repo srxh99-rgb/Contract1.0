@@ -17,7 +17,8 @@ const getFileIcon = (type: string) => {
     return <FileText size={28} className="text-red-500"/>;
 };
 
-export default function Dashboard({ user, searchQuery, setSearchQuery, onViewChange }: any) {
+// 🟢 修复：移除未使用的 onViewChange
+export default function Dashboard({ user, searchQuery, setSearchQuery }: any) {
     const [contracts, setContracts] = useState<any[]>([]);
     const [folders, setFolders] = useState<any[]>([]);
     const [folderStack, setFolderStack] = useState<{id:number, name:string}[]>([{id:0, name:'根目录'}]);
@@ -36,7 +37,6 @@ export default function Dashboard({ user, searchQuery, setSearchQuery, onViewCha
     const [permissionTarget, setPermissionTarget] = useState<{id:number, type:'file'|'folder'}|null>(null);
     const [confirmData, setConfirmData] = useState<any>(null);
     
-    // 🟢 关键修复：统一使用自定义 Alert
     const [alertMsg, setAlertMsg] = useState('');
 
     const fetchData = useCallback(async () => {
@@ -164,12 +164,10 @@ export default function Dashboard({ user, searchQuery, setSearchQuery, onViewCha
 
     return (
         <div className="flex-1 p-8 overflow-y-auto h-full relative">
-            {/* 全局弹窗区域 */}
             {alertMsg && <AlertModal message={alertMsg} onClose={()=>setAlertMsg('')} />}
             {permissionTarget && <PermissionModal targetId={permissionTarget.id} targetType={permissionTarget.type} onClose={()=>setPermissionTarget(null)} showAlert={setAlertMsg}/>}
             {confirmData && <ConfirmModal {...confirmData} />}
             
-            {/* 🟢 修复：传递 showAlert 给上传组件，确保错误提示使用自定义弹窗 */}
             {showUpload && (
                 <UploadModal 
                     folderId={currentFolderId} 
@@ -180,7 +178,6 @@ export default function Dashboard({ user, searchQuery, setSearchQuery, onViewCha
                 />
             )}
 
-            {/* 顶部工具栏 */}
             <div className="flex items-center justify-between mb-6">
                 {searchQuery ? (
                     <div className="flex items-center gap-4">
@@ -207,7 +204,6 @@ export default function Dashboard({ user, searchQuery, setSearchQuery, onViewCha
                 )}
             </div>
 
-            {/* 新建文件夹行 */}
             {isCreatingFolder && (
                 <div className="mb-6 bg-white p-4 rounded-xl border border-blue-100 flex items-center gap-2 w-64 shadow-sm animate-in slide-in-from-top-2">
                     <Folder size={20} className="text-blue-500"/>
@@ -217,12 +213,12 @@ export default function Dashboard({ user, searchQuery, setSearchQuery, onViewCha
                 </div>
             )}
 
-            {/* 文件夹网格 */}
             <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6 mb-8">
                 {folders.map(f => (
                     <div key={f.id} onClick={()=>enterFolder(f.id, f.name)} className="bg-white p-5 rounded-xl border border-gray-100 hover:shadow-lg cursor-pointer group relative transition-all flex items-center gap-3">
                         <Folder size={32} className="text-blue-400 fill-blue-50"/>
-                        {editingId?.id === f.id && editingId.type === 'folder' ? (
+                        {/* 🟢 修复：增强的空值检查 */}
+                        {editingId && editingId.id === f.id && editingId.type === 'folder' ? (
                             <div className="flex items-center gap-1 flex-1" onClick={e=>e.stopPropagation()}>
                                 <input autoFocus value={editingName} onChange={e=>setEditingName(e.target.value)} onKeyDown={handleEditKeyDown} className="w-full border rounded px-1 py-0.5 text-sm"/>
                                 <button onClick={handleRename} className="text-green-600"><Check size={14}/></button>
@@ -240,7 +236,6 @@ export default function Dashboard({ user, searchQuery, setSearchQuery, onViewCha
                 ))}
             </div>
 
-            {/* 文件网格 */}
             <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
                 {contracts.map(c => (
                     <div key={c.id} onClick={()=>setSelectedContract(c)} className="bg-white p-5 rounded-xl border border-gray-100 hover:shadow-lg cursor-pointer group relative transition-all hover:-translate-y-1">
@@ -254,7 +249,8 @@ export default function Dashboard({ user, searchQuery, setSearchQuery, onViewCha
                                 </div>
                             )}
                         </div>
-                        {editingId?.id === c.id && editingId.type === 'file' ? (
+                        {/* 🟢 修复：增强的空值检查 */}
+                        {editingId && editingId.id === c.id && editingId.type === 'file' ? (
                             <div className="mb-2 flex items-center gap-1" onClick={e=>e.stopPropagation()}>
                                 <input autoFocus value={editingName} onChange={e=>setEditingName(e.target.value)} onKeyDown={handleEditKeyDown} className="w-full border rounded px-1 py-0.5 text-sm font-bold"/>
                                 <button onClick={handleRename} className="text-green-600"><Check size={14}/></button>

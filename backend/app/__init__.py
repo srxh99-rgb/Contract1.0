@@ -4,6 +4,8 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
 import pymysql
+from .extensions import socketio
+
 
 from .config import Config
 from .extensions import limiter
@@ -42,6 +44,7 @@ def create_app():
     limiter.init_app(app)
 
     # 注册蓝图 (将拆分的路由挂载到主程序)
+    socketio.init_app(app, cors_allowed_origins="*")
     app.register_blueprint(auth_bp)
     app.register_blueprint(admin_bp)
     app.register_blueprint(file_bp)
