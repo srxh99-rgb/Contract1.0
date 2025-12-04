@@ -3,13 +3,19 @@ import pyotp
 import qrcode
 import io
 import base64
-from flask import Blueprint, jsonify, request, current_app
+import json
+import os
+from flask import Blueprint, jsonify, request, current_app, send_file
 
 from app.db import get_db_connection
 from app.decorators import token_required, admin_required, super_admin_required
 from app.utils.common import get_beijing_time, check_password_complexity
 from app.utils.db_helpers import get_user_group_ids, get_all_sub_file_ids
 from app.routes.file_ops import _propagate_folder_permissions
+
+# 导入备份服务
+from app.utils.backup_service import BackupManager
+from app.scheduler import update_backup_job
 
 admin_bp = Blueprint('admin', __name__)
 
@@ -36,7 +42,6 @@ def check_password_reuse():
             return jsonify({"success": True})
     finally: conn.close()
 
-# 🟢 修复：去掉了多余的 @ 符号
 @admin_bp.route('/api/admin/complete_setup', methods=['POST'])
 @token_required
 def complete_initial_setup():
@@ -70,7 +75,9 @@ def complete_initial_setup():
             cursor.execute("""
                 UPDATE users SET password=%s, mfa_secret=%s, force_change_password=0 WHERE id=%s
             """, (new_password, final_mfa, user_id))
-            cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'COMPLETE_SETUP', 'N/A', %s)", (user_id, get_beijing_time()))
+            
+            # 🟢 中文日志
+            cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'COMPLETE_SETUP', '初始化设置完成', %s)", (user_id, get_beijing_time()))
             conn.commit()
             return jsonify({"success": True})
     finally: conn.close()
@@ -119,7 +126,18 @@ def unbind_mfa():
                 target_user = cursor.fetchone()
                 if target_user and target_user['role'] == 'admin':
                     return jsonify({"error": "Permission denied"}), 403
+            
+            # 查询用户名
+            cursor.execute("SELECT username FROM users WHERE id=%s", (target_user_id,))
+            t_user = cursor.fetchone()
+            t_name = t_user['username'] if t_user else str(target_user_id)
+
             cursor.execute("UPDATE users SET mfa_secret=NULL WHERE id=%s", (target_user_id,))
+            
+            # 🟢 中文日志
+            trace_info = f"解绑MFA: {t_name}"
+            cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'UNBIND_MFA', %s, %s)", (current_user_id, trace_info, get_beijing_time()))
+            
             conn.commit()
             return jsonify({"success": True})
     finally: conn.close()
@@ -151,6 +169,11 @@ def create_admin():
             cursor.execute("INSERT INTO users (username, password, name, email, role, is_active, force_change_password) VALUES (%s, %s, %s, '', 'admin', 1, 1)", (username, password, name))
             new_id = cursor.lastrowid
             cursor.execute("INSERT INTO group_members (group_id, user_id) SELECT id, %s FROM user_groups WHERE name='管理组'", (new_id,))
+            
+            # 🟢 中文日志
+            trace_info = f"创建管理员: {username} (ID:{new_id})"
+            cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'CREATE_ADMIN', %s, %s)", (request.current_user_id, trace_info, get_beijing_time()))
+            
             conn.commit()
             return jsonify({"success": True})
     finally: conn.close()
@@ -161,12 +184,24 @@ def admin_reset_password():
     data = request.json
     target_id = data.get('user_id')
     new_password = data.get('password')
+    operator_id = request.current_user_id
+
     if not target_id or not new_password: return jsonify({"error": "Missing parameters"}), 400
     if not check_password_complexity(new_password): return jsonify({"error": "密码强度不足"}), 400
+
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
+            cursor.execute("SELECT username FROM users WHERE id=%s", (target_id,))
+            target_user = cursor.fetchone()
+            target_name = target_user['username'] if target_user else f"ID:{target_id}"
+
             cursor.execute("UPDATE users SET password=%s, force_change_password=1 WHERE id=%s", (new_password, target_id))
+            
+            # 🟢 中文日志
+            trace_info = f"重置用户密码: {target_name}"
+            cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'RESET_USER_PWD', %s, %s)", (operator_id, trace_info, get_beijing_time()))
+            
             conn.commit()
             return jsonify({"success": True})
     finally: conn.close()
@@ -174,13 +209,23 @@ def admin_reset_password():
 @admin_bp.route('/api/admin/delete_admin/<int:uid>', methods=['DELETE'])
 @super_admin_required
 def delete_admin_account(uid):
+    operator_id = request.current_user_id
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
+            cursor.execute("SELECT username FROM users WHERE id=%s", (uid,))
+            target = cursor.fetchone()
+            target_name = target['username'] if target else "Unknown"
+
             cursor.execute("DELETE FROM group_members WHERE user_id=%s", (uid,))
             cursor.execute("DELETE FROM folder_permissions WHERE subject_type='user' AND subject_id=%s", (uid,))
             cursor.execute("DELETE FROM contract_permissions WHERE subject_type='user' AND subject_id=%s", (uid,))
             cursor.execute("DELETE FROM users WHERE id=%s", (uid,))
+            
+            # 🟢 中文日志
+            trace_info = f"删除管理员: {target_name} (ID:{uid})"
+            cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'DELETE_ADMIN', %s, %s)", (operator_id, trace_info, get_beijing_time()))
+            
             conn.commit()
             return jsonify({"success": True})
     finally: conn.close()
@@ -198,6 +243,10 @@ def update_admin_profile():
         with conn.cursor() as cursor:
             if new_username: cursor.execute("UPDATE users SET username=%s WHERE id=%s", (new_username, user_id))
             if new_password: cursor.execute("UPDATE users SET password=%s WHERE id=%s", (new_password, user_id))
+            
+            # 🟢 中文日志
+            cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'UPDATE_PROFILE', '更新个人资料', %s)", (user_id, get_beijing_time()))
+            
             conn.commit()
             return jsonify({"success": True})
     finally: conn.close()
@@ -211,6 +260,10 @@ def update_group_name(gid):
     try:
         with conn.cursor() as cursor:
             cursor.execute("UPDATE user_groups SET name=%s WHERE id=%s", (name, gid))
+            
+            # 🟢 中文日志
+            cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'UPDATE_GROUP', %s, %s)", (request.current_user_id, f"用户组重命名: {name}", get_beijing_time()))
+            
             conn.commit()
             return jsonify({"success": True})
     except: return jsonify({"error": "Duplicate name"}), 400
@@ -254,6 +307,7 @@ def get_file_permissions(cid):
 @admin_required
 def update_file_permissions(cid):
     perms = request.json 
+    user_id = request.current_user_id
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
@@ -261,6 +315,11 @@ def update_file_permissions(cid):
             if perms:
                 vals = [(cid, p.get('subject_id'), p.get('subject_type'), p.get('can_view', 0), p.get('can_download', 0)) for p in perms]
                 cursor.executemany("INSERT INTO contract_permissions (contract_id, subject_id, subject_type, can_view, can_download) VALUES (%s, %s, %s, %s, %s)", vals)
+            
+            # 🟢 中文日志
+            trace_info = f"修改文件权限: {len(perms)} 项"
+            cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, %s, 'UPDATE_FILE_PERM', %s, %s)", (user_id, cid, trace_info, get_beijing_time()))
+            
             conn.commit()
             return jsonify({"success": True})
     finally: conn.close()
@@ -303,6 +362,7 @@ def get_folder_permissions(folder_id):
 @admin_required
 def update_folder_permissions(folder_id):
     perms = request.json 
+    user_id = request.current_user_id
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
@@ -317,6 +377,11 @@ def update_folder_permissions(folder_id):
                 cursor.execute(f"DELETE FROM contract_permissions WHERE contract_id IN ({fmt})", tuple(all_file_ids))
                 for p in perms:
                     _propagate_folder_permissions(cursor, folder_id, p.get('subject_id'), p.get('subject_type'), p.get('can_view', 0), p.get('can_download', 0))
+            
+            # 🟢 中文日志
+            trace_info = f"修改文件夹权限 (ID:{folder_id})"
+            cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'UPDATE_FOLDER_PERM', %s, %s)", (user_id, trace_info, get_beijing_time()))
+            
             conn.commit()
             return jsonify({"success": True})
     finally: conn.close()
@@ -347,6 +412,12 @@ def update_user_groups():
             if group_ids:
                 vals = [(gid, user_id) for gid in group_ids]
                 cursor.executemany("INSERT INTO group_members (group_id, user_id) VALUES (%s, %s)", vals)
+            
+            # 🟢 中文日志
+            group_str = ",".join(map(str, group_ids))
+            trace_info = f"用户ID:{user_id} 分配组: [{group_str}]"
+            cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'UPDATE_USER_GROUP', %s, %s)", (request.current_user_id, trace_info, get_beijing_time()))
+            
             conn.commit()
             return jsonify({"success": True})
     finally: conn.close()
@@ -360,10 +431,16 @@ def delete_group(gid):
             cursor.execute("SELECT name FROM user_groups WHERE id=%s", (gid,))
             g = cursor.fetchone()
             if g['name'] in ['默认组', '管理组']: return jsonify({"error": "Cannot delete system groups"}), 400
+            
             cursor.execute("DELETE FROM group_members WHERE group_id=%s", (gid,))
             cursor.execute("DELETE FROM folder_permissions WHERE subject_id=%s AND subject_type='group'", (gid,))
             cursor.execute("DELETE FROM contract_permissions WHERE subject_id=%s AND subject_type='group'", (gid,))
             cursor.execute("DELETE FROM user_groups WHERE id=%s", (gid,))
+            
+            # 🟢 中文日志
+            group_name = g['name']
+            cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'DELETE_GROUP', %s, %s)", (request.current_user_id, f"删除用户组: {group_name}", get_beijing_time()))
+            
             conn.commit()
             return jsonify({"success": True})
     finally: conn.close()
@@ -373,10 +450,21 @@ def delete_group(gid):
 def toggle_user_status():
     uid = request.json.get('user_id')
     status = request.json.get('status') 
+    operator_id = request.current_user_id
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
+            cursor.execute("SELECT username FROM users WHERE id=%s", (uid,))
+            target = cursor.fetchone()
+            target_name = target['username'] if target else str(uid)
+
             cursor.execute("UPDATE users SET is_active=%s WHERE id=%s", (1 if status else 0, uid))
+            
+            # 🟢 中文日志
+            action_desc = '启用用户' if status else '禁用用户'
+            trace_info = f"{action_desc}: {target_name}"
+            cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, %s, %s, %s)", (operator_id, 'ENABLE_USER' if status else 'DISABLE_USER', trace_info, get_beijing_time()))
+            
             conn.commit()
             return jsonify({"success": True})
     finally: conn.close()
@@ -390,6 +478,10 @@ def create_group():
     try:
         with conn.cursor() as cursor:
             cursor.execute("INSERT INTO user_groups (name) VALUES (%s)", (name,))
+            
+            # 🟢 中文日志
+            cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'CREATE_GROUP', %s, %s)", (request.current_user_id, f"新建用户组: {name}", get_beijing_time()))
+            
             conn.commit()
             return jsonify({"success": True})
     except: return jsonify({"error": "组名已存在"}), 400
@@ -414,3 +506,83 @@ def get_users_list():
             cursor.execute("SELECT id, name, email, role FROM users WHERE role != 'admin'")
             return jsonify(cursor.fetchall())
     finally: conn.close()
+
+@admin_bp.route('/api/admin/backups', methods=['GET'])
+@admin_required
+def get_backups():
+    root_dir = os.path.dirname(current_app.root_path)
+    bm = BackupManager(root_dir)
+    return jsonify(bm.list_backups())
+
+@admin_bp.route('/api/admin/backups/<filename>', methods=['DELETE'])
+@admin_required
+def delete_backup(filename):
+    root_dir = os.path.dirname(current_app.root_path)
+    bm = BackupManager(root_dir)
+    try:
+        if bm.delete_backup(filename):
+            return jsonify({"success": True})
+        return jsonify({"error": "File not found"}), 404
+    except ValueError:
+        return jsonify({"error": "Invalid filename"}), 400
+
+@admin_bp.route('/api/admin/backups/download/<filename>', methods=['GET'])
+@admin_required
+def download_backup(filename):
+    user_id = request.current_user_id
+    root_dir = os.path.dirname(current_app.root_path)
+    bm = BackupManager(root_dir)
+    path = bm.get_backup_path(filename)
+    if path:
+        # 🟢 中文日志 (手动连接 DB)
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cursor:
+                trace_info = f"下载系统备份: {filename}"
+                cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'DOWNLOAD_BACKUP', %s, %s)", (user_id, trace_info, get_beijing_time()))
+                conn.commit()
+        except: pass
+        finally: conn.close()
+
+        return send_file(path, as_attachment=True, download_name=filename)
+    return jsonify({"error": "File not found"}), 404
+
+@admin_bp.route('/api/admin/backups/config', methods=['GET', 'POST'])
+@admin_required
+def manage_backup_config():
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            if request.method == 'GET':
+                cursor.execute("SELECT value FROM system_settings WHERE `key`='backup_schedule'")
+                row = cursor.fetchone()
+                config = json.loads(row['value']) if row else {"type": "daily", "time": "02:00"}
+                return jsonify(config)
+            
+            elif request.method == 'POST':
+                new_config = request.json
+                if new_config.get('type') not in ['daily', 'weekly', 'interval']:
+                    return jsonify({"error": "Invalid type"}), 400
+                
+                json_val = json.dumps(new_config)
+                cursor.execute("INSERT INTO system_settings (`key`, `value`) VALUES ('backup_schedule', %s) ON DUPLICATE KEY UPDATE `value`=%s", (json_val, json_val))
+                
+                # 🟢 中文日志
+                cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'UPDATE_SYS_CONFIG', '修改备份策略', %s)", (request.current_user_id, get_beijing_time()))
+                
+                conn.commit()
+                
+                update_backup_job(current_app._get_current_object())
+                return jsonify({"success": True})
+    finally: conn.close()
+
+@admin_bp.route('/api/admin/backups/run_now', methods=['POST'])
+@admin_required
+def run_backup_manually():
+    root_dir = os.path.dirname(current_app.root_path)
+    bm = BackupManager(root_dir)
+    try:
+        filename = bm.create_backup()
+        return jsonify({"success": True, "filename": filename})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
