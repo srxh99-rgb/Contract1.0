@@ -99,7 +99,7 @@ export default function WatermarkVerifyView() {
                                     {Object.entries(result.details).map(([k, v]: any) => (
                                         <div key={k} className="flex flex-col">
                                             <span className="text-xs text-gray-500 uppercase">{k}</span>
-                                            <span className="font-medium">{v}</span>
+                                            <span className="font-medium break-all">{v}</span>
                                         </div>
                                     ))}
                                 </div>
