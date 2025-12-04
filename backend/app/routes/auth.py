@@ -18,6 +18,7 @@ from app.utils.common import get_beijing_time
 from app.decorators import token_required
 
 auth_bp = Blueprint('auth', __name__)
+# 配置日志记录器
 logger = logging.getLogger(__name__)
 
 # 内存中存储验证码 (生产环境建议用Redis)
@@ -77,6 +78,9 @@ def login_admin():
     captcha_token = data.get('captcha_token')
     captcha_code = data.get('captcha_code')
 
+    # 添加日志：记录尝试登录的用户名（不记录密码）
+    logger.info(f"Login attempt for user: {username}")
+
     if not captcha_token or not captcha_code:
         return jsonify({"error": "请输入验证码"}), 400
     
@@ -85,6 +89,7 @@ def login_admin():
     clean_captcha_store()
     stored = CAPTCHA_STORE.get(captcha_token)
     if not stored or stored['code'].lower() != captcha_code.lower():
+        logger.warning(f"Captcha failed for user: {username}")
         return jsonify({"error": "图形验证码错误"}), 400
     del CAPTCHA_STORE[captcha_token]
 
@@ -95,11 +100,18 @@ def login_admin():
             user = cursor.fetchone()
             
             if not user:
+                logger.warning(f"Login failed: User {username} not found")
                 return jsonify({"error": "账号或密码错误"}), 401
             
+            # 检查锁定状态
             if user.get('lockout_until') and user['lockout_until'] > get_beijing_time():
+                logger.warning(f"Login locked for user: {username}")
+                # 记录锁定日志
+                cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'LOGIN_LOCKED', 'N/A', %s)", (user['id'], get_beijing_time()))
+                conn.commit()
                 return jsonify({"error": f"账号已锁定，请在 {user['lockout_until']} 后重试"}), 403
             
+            # 密码验证失败
             if user['password'] != password:
                 fails = (user.get('failed_attempts') or 0) + 1
                 if fails >= 5:
@@ -107,13 +119,17 @@ def login_admin():
                     cursor.execute("UPDATE users SET failed_attempts=%s, lockout_until=%s WHERE id=%s", (fails, lock_until, user['id']))
                 else:
                     cursor.execute("UPDATE users SET failed_attempts=%s WHERE id=%s", (fails, user['id']))
+                
+                # 记录失败日志
+                cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'LOGIN_FAILED', 'N/A', %s)", (user['id'], get_beijing_time()))
                 conn.commit()
+                
+                logger.warning(f"Password mismatch for user: {username}, fails: {fails}")
                 return jsonify({"error": f"密码错误，剩余次数: {5 - fails}"}), 401
             
             # 登录成功，清除失败记录
             cursor.execute("UPDATE users SET failed_attempts=0, lockout_until=NULL WHERE id=%s", (user['id'],))
-            conn.commit()
-
+            
             SECRET_KEY = current_app.config['SECRET_KEY']
 
             # 强制修改密码流程
@@ -127,6 +143,8 @@ def login_admin():
                     'mfa_enabled': bool(user.get('mfa_secret')), 
                     'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
                 }, SECRET_KEY, algorithm="HS256")
+                conn.commit()
+                logger.info(f"User {username} requires password setup")
                 return jsonify({
                     "status": "setup_required", 
                     "token": setup_token, 
@@ -142,14 +160,15 @@ def login_admin():
                     'username': user['username'],
                     'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=5)
                 }, SECRET_KEY, algorithm="HS256")
-                
+                conn.commit()
+                logger.info(f"User {username} requires MFA")
                 return jsonify({
                     "status": "mfa_required", 
                     "pre_auth_token": pre_auth_token,
                     "message": "请输入动态验证码"
                 }), 200
 
-            # 直接生成 Token
+            # 直接生成 Token (无 MFA)
             token = jwt.encode({
                 'user_id': user['id'], 
                 'username': user['username'], 
@@ -159,15 +178,21 @@ def login_admin():
                 'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
             }, SECRET_KEY, algorithm="HS256")
             
-            cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'LOGIN_ADMIN', 'N/A', %s)", (user['id'], get_beijing_time()))
+            # 根据角色记录不同的日志类型
+            action_type = 'LOGIN_ADMIN' if user['role'] == 'admin' else 'LOGIN_USER'
+            cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, %s, 'N/A', %s)", (user['id'], action_type, get_beijing_time()))
             conn.commit()
             
+            logger.info(f"User {username} logged in successfully as {user['role']}")
             return jsonify({
                 "status": "success", 
                 "token": token, 
                 "user": user,
                 "mfa_enabled": False
             })
+    except Exception as e:
+        logger.error(f"Login Error: {e}")
+        return jsonify({"error": "Login failed due to server error"}), 500
     finally: conn.close()
 
 @auth_bp.route('/api/login/verify_mfa', methods=['POST'])
@@ -200,6 +225,10 @@ def verify_login_mfa():
 
             totp = pyotp.TOTP(user['mfa_secret'])
             if not totp.verify(code, valid_window=1):
+                # 记录 MFA 失败日志
+                cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'LOGIN_MFA_FAILED', 'N/A', %s)", (user['id'], get_beijing_time()))
+                conn.commit()
+                logger.warning(f"MFA failed for user: {user.get('username')}")
                 return jsonify({"error": "动态验证码错误"}), 400
 
             token = jwt.encode({
@@ -211,9 +240,11 @@ def verify_login_mfa():
                 'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
             }, SECRET_KEY, algorithm="HS256")
             
+            # 记录 MFA 成功日志
             cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'LOGIN_MFA_SUCCESS', 'N/A', %s)", (user['id'], get_beijing_time()))
             conn.commit()
             
+            logger.info(f"MFA verified successfully for user: {user.get('username')}")
             return jsonify({
                 "status": "success",
                 "token": token,
@@ -227,23 +258,33 @@ def verify_login_mfa():
 def login_feishu():
     code = request.json.get('code')
     SECRET_KEY = current_app.config['SECRET_KEY']
+    logger.info("Feishu login initiated")
+    
     try:
         t_token = get_tenant_access_token()
+        if not t_token:
+            logger.error("Failed to get Feishu Tenant Token")
+            return jsonify({"error": "飞书配置错误"}), 500
+            
         headers = {"Authorization": f"Bearer {t_token}"}
         auth_resp = requests.post("https://open.feishu.cn/open-apis/authen/v1/oidc/access_token", json={"grant_type": "authorization_code", "code": code}, headers=headers).json()
         
         if "data" not in auth_resp: 
+            logger.error(f"Feishu Auth Failed: {auth_resp}")
             return jsonify({"error": "Token失效"}), 400
         
         u_info = requests.get("https://open.feishu.cn/open-apis/authen/v1/user_info", headers={"Authorization": f"Bearer {auth_resp['data']['access_token']}"}).json().get("data", {})
         feishu_id = u_info.get("open_id")
         
+        logger.info(f"Feishu user identified: {u_info.get('name')} ({feishu_id})")
+
         conn = get_db_connection()
         try:
             with conn.cursor() as cursor:
                 cursor.execute("SELECT * FROM users WHERE feishu_open_id=%s", (feishu_id,))
                 user = cursor.fetchone()
                 if not user:
+                    logger.info(f"Creating new user from Feishu: {u_info.get('name')}")
                     cursor.execute("INSERT INTO users (feishu_open_id, name, email, role) VALUES (%s, %s, %s, 'user')", (feishu_id, u_info.get("name"), u_info.get("email")))
                     conn.commit()
                     user_id = cursor.lastrowid
@@ -251,6 +292,7 @@ def login_feishu():
                     user = cursor.fetchone()
                 
                 if not user['is_active']: 
+                    logger.warning(f"Feishu login blocked (inactive): {user['name']}")
                     return jsonify({"error": "该账号已被禁用"}), 403
                 
                 # 非管理员自动加入默认组
@@ -263,7 +305,9 @@ def login_feishu():
                 cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, 0, 'LOGIN_FEISHU', 'N/A', %s)", (user['id'], get_beijing_time()))
                 conn.commit()
                 
+                logger.info(f"Feishu login success for: {user['name']}")
                 return jsonify({"status": "success", "token": token, "user": user})
         finally: conn.close()
     except Exception as e: 
+        logger.error(f"Feishu Login Exception: {e}")
         return jsonify({"error": str(e)}), 500
