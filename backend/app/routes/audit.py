@@ -9,7 +9,7 @@ from app.utils.watermark import WatermarkEngine
 
 audit_bp = Blueprint('audit', __name__)
 
-@audit_bp.route('/api/verify', methods=['POST'])
+@audit_bp.route('/api/audit/verify_watermark', methods=['POST'])
 @admin_required
 def verify_watermark():
     if 'file' not in request.files: return jsonify({"error": "No file"}), 400
@@ -23,12 +23,12 @@ def verify_watermark():
         file.save(temp_path)
         try:
             result = WatermarkEngine.extract_blind_watermark(temp_path)
-            return jsonify({"success": True, "data": result})
+            return jsonify(result)
         finally:
             if os.path.exists(temp_path): os.remove(temp_path)
     return jsonify({"error": "Upload failed"}), 500
 
-@audit_bp.route('/api/logs', methods=['GET'])
+@audit_bp.route('/api/audit/logs', methods=['GET'])
 @admin_required
 def get_audit_logs():
     conn = get_db_connection()
