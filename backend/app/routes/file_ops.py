@@ -138,6 +138,7 @@ def check_file_existence():
 @file_bp.route('/api/upload', methods=['POST'])
 @token_required
 def upload_file():
+    # 检查权限：当前仅允许 Admin 上传，如需开放可调整此处
     if request.current_user_role != 'admin': return jsonify({"error": "Permission denied"}), 403
     file = request.files.get('file')
     user_id = request.current_user_id
@@ -166,6 +167,7 @@ def upload_file():
                 cursor.execute("SELECT id, file_path FROM contracts WHERE folder_id=%s AND title=%s", (final_folder_id, original_filename))
                 existing = cursor.fetchone()
                 new_file_id = 0
+                action_type = "UPLOAD"
                 
                 if existing:
                     if conflict_mode == 'replace':
@@ -175,6 +177,7 @@ def upload_file():
                             except: pass
                         cursor.execute("UPDATE contracts SET file_path=%s, file_size=%s, created_at=%s WHERE id=%s", (save_path, size, get_beijing_time(), existing['id']))
                         new_file_id = existing['id']
+                        action_type = "UPLOAD_REPLACE"
                     else: 
                         name_part = original_filename.rsplit('.', 1)[0]
                         new_filename = f"{name_part} (1).{ext}" 
@@ -195,6 +198,13 @@ def upload_file():
                 if perm_values:
                     stmt = "INSERT IGNORE INTO contract_permissions (contract_id, subject_id, subject_type, can_view, can_download) VALUES (%s, %s, %s, %s, %s)"
                     cursor.executemany(stmt, perm_values)
+                trace_id = f"UPLOAD_{user_id}_{uuid.uuid4().hex[:8]}"
+                # 🟢 新增：写入审计日志
+                cursor.execute(
+                    "INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, %s, %s, 'N/A', %s)", 
+                    (user_id, new_file_id, action_type, get_beijing_time())
+                )
+                
                 conn.commit()
         finally: conn.close()
         return jsonify({"success": True})
@@ -273,6 +283,8 @@ def secure_download(cid):
             file_hash = calculate_file_hash(contract['file_path'])
             trace_id = f"TRACE_{user_id}_{int(time.time())}_{file_hash}"
             action = 'PREVIEW' if is_preview else 'DOWNLOAD'
+            
+            # 🟢 写入审计日志
             cursor.execute("INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, %s, %s, %s, %s)", (user_id, cid, action, trace_id, get_beijing_time()))
             conn.commit()
             
@@ -351,11 +363,26 @@ def delete_contract(cid):
             cursor.execute("SELECT uploader_id, file_path FROM contracts WHERE id=%s", (cid,))
             row = cursor.fetchone()
             if not row: return jsonify({"error": "Not found"}), 404
+            
             if request.current_user_role != 'admin' and str(row['uploader_id']) != str(request.current_user_id):
                 return jsonify({"error": "Permission denied"}), 403
+            
+            # 🟢 新增：写入审计日志 (在删除数据前)
+            # 注意：删除文件后，日志中关联的 file_name (通过LEFT JOIN contracts) 将变为空，
+            # 这是当前数据库设计的限制，但操作记录会保留。
+            cursor.execute(
+                "INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, %s, 'DELETE', 'N/A', %s)", 
+                (request.current_user_id, cid, get_beijing_time())
+            )
+            
             if row and os.path.exists(row['file_path']):
                 try: os.remove(row['file_path'])
                 except: pass
+            trace_id = f"DELETE_{request.current_user_id}_{int(time.time())}"
+            cursor.execute(
+                "INSERT INTO audit_logs (user_id, contract_id, action_type, trace_id, created_at) VALUES (%s, %s, %s, %s, %s)",
+                (request.current_user_id, cid, 'DELETE', trace_id, get_beijing_time())
+            )
             cursor.execute("DELETE FROM contracts WHERE id=%s", (cid,))
             cursor.execute("DELETE FROM contract_permissions WHERE contract_id=%s", (cid,))
             conn.commit()
